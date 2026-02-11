@@ -5,20 +5,28 @@ package-lock.json
 # Environment
 .env
 .env.local
+.env.*.local
 
 # Logs
-*.log
 logs/
+*.log
+npm-debug.log*
+api.log
 
-# Results
-results/*.json
-results/*.pdf
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# PDF files (don't commit large PDFs)
+*.pdf
+data/epstein/*.pdf
 
 # Database
 *.db
 *.sqlite
 
-# OS
+# OS files
 .DS_Store
 Thumbs.db
 
@@ -27,8 +35,28 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+*~
+
+# Moltbook keys
+.moltbook-key
+
+# Build artifacts
+dist/
+build/
+
+# Test coverage
+coverage/
+.nyc_output/
 
 # Secrets
+secrets/
 *.pem
 *.key
-.moltbook-key
+!*.pub
+
+# Docker
+.dockerignore
+
+# Results (too large for git, use LFS or separate storage)
+results/*.json
+!results/.gitkeep
