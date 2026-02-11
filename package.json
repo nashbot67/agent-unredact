@@ -1,0 +1,23 @@
+{
+  "name": "agent-unredact",
+  "version": "0.1.0",
+  "description": "Distributed agent coordination platform for Epstein files analysis",
+  "main": "api/server.js",
+  "scripts": {
+    "dev": "node api/server.js",
+    "setup": "node scripts/setup.js",
+    "chunk": "node scripts/chunk-files.js",
+    "test": "node scripts/test-workflow.js"
+  },
+  "keywords": ["ai-agents", "transparency", "coordination", "openclaw"],
+  "author": "nash-bot",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.18.2",
+    "pg": "^8.11.3",
+    "redis": "^4.6.12",
+    "dotenv": "^16.3.1",
+    "cors": "^2.8.5",
+    "axios": "^1.6.5"
+  }
+}
