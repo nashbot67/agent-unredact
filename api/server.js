@@ -16,6 +16,9 @@ const pool = new Pool({
 const agents = new Map();
 const tasks = new Map();
 const results = new Map();
+const findings = new Map(); // findingId -> finding
+const verifications = new Map(); // findingId -> [verification]
+let findingIdCounter = 1;
 
 // Initialize sample tasks
 function initializeTasks() {
@@ -182,13 +185,37 @@ app.post('/api/tasks/:task_id/submit', (req, res) => {
   results.set(task.task_id, result);
   task.status = 'completed';
   
+  // Create individual finding records for verification
+  for (const finding of result.findings) {
+    const id = findingIdCounter++;
+    findings.set(id, {
+      id,
+      result_id: task.task_id,
+      task_id: task.task_id,
+      agent_id: agentId,
+      type: finding.type,
+      entity_type: finding.entity_type || null,
+      page: finding.page,
+      content: finding.content,
+      context: finding.context || null,
+      confidence: finding.confidence || 0.5,
+      technique: finding.technique || null,
+      status: 'pending',
+      is_victim: false,
+      is_public_figure: null,
+      verification_count: 0,
+      verified_by: [],
+      created_at: new Date().toISOString()
+    });
+  }
+  
   const agent = agents.get(agentId);
   if (agent) {
     agent.tasks_completed++;
   }
   
   console.log(`Results submitted for ${task.task_id} by ${agentId}`);
-  console.log(`Findings: ${result.findings.length}, Stats:`, result.stats);
+  console.log(`Findings: ${result.findings.length} (${findings.size} total), Stats:`, result.stats);
   
   res.json({ success: true, result });
 });
@@ -222,6 +249,241 @@ app.get('/api/tasks', (req, res) => {
   res.json({
     tasks: taskList,
     count: taskList.length
+  });
+});
+
+// ==========================================
+// FINDINGS & VERIFICATION ENDPOINTS
+// ==========================================
+
+// Get all findings (with filtering)
+app.get('/api/findings', (req, res) => {
+  let findingsList = Array.from(findings.values());
+  
+  if (req.query.type) {
+    findingsList = findingsList.filter(f => f.type === req.query.type);
+  }
+  if (req.query.entity_type) {
+    findingsList = findingsList.filter(f => f.entity_type === req.query.entity_type);
+  }
+  if (req.query.status) {
+    findingsList = findingsList.filter(f => f.status === req.query.status);
+  }
+  if (req.query.min_confidence) {
+    findingsList = findingsList.filter(f => f.confidence >= parseFloat(req.query.min_confidence));
+  }
+  
+  const page = parseInt(req.query.page) || 1;
+  const limit = Math.min(parseInt(req.query.limit) || 50, 500);
+  const start = (page - 1) * limit;
+  const paginated = findingsList.slice(start, start + limit);
+  
+  res.json({
+    findings: paginated,
+    page,
+    total: findingsList.length,
+    pages: Math.ceil(findingsList.length / limit)
+  });
+});
+
+// Get a specific finding
+app.get('/api/findings/:id', (req, res) => {
+  const finding = findings.get(parseInt(req.params.id));
+  if (!finding) {
+    return res.status(404).json({ error: 'Finding not found' });
+  }
+  
+  const findingVerifications = verifications.get(finding.id) || [];
+  res.json({
+    ...finding,
+    verifications: findingVerifications
+  });
+});
+
+// Get findings pending verification
+app.get('/api/verify/pending', (req, res) => {
+  const agentId = req.headers['x-agent-id'];
+  const limit = parseInt(req.query.limit) || 50;
+  
+  const pending = Array.from(findings.values())
+    .filter(f => f.status === 'pending' && !f.is_victim)
+    .filter(f => {
+      // Don't return findings by this agent (can't self-verify)
+      if (agentId && f.agent_id === agentId) return false;
+      // Don't return findings already verified by this agent
+      const fVerifications = verifications.get(f.id) || [];
+      return !fVerifications.some(v => v.verifier_agent_id === agentId);
+    })
+    .sort((a, b) => b.confidence - a.confidence)
+    .slice(0, limit);
+  
+  res.json({
+    findings: pending,
+    count: pending.length
+  });
+});
+
+// Submit a verification for a finding
+app.post('/api/verify/:finding_id', (req, res) => {
+  const agentId = req.headers['x-agent-id'];
+  const findingId = parseInt(req.params.finding_id);
+  const { verdict, confidence, notes } = req.body;
+  
+  if (!agentId) {
+    return res.status(400).json({ error: 'X-Agent-ID header required' });
+  }
+  
+  if (!['confirm', 'dispute', 'reject', 'flag_victim'].includes(verdict)) {
+    return res.status(400).json({ error: 'Invalid verdict. Must be: confirm, dispute, reject, flag_victim' });
+  }
+  
+  const finding = findings.get(findingId);
+  if (!finding) {
+    return res.status(404).json({ error: 'Finding not found' });
+  }
+  
+  if (finding.agent_id === agentId) {
+    return res.status(403).json({ error: 'Cannot verify your own finding' });
+  }
+  
+  const fVerifications = verifications.get(findingId) || [];
+  if (fVerifications.some(v => v.verifier_agent_id === agentId)) {
+    return res.status(409).json({ error: 'Already verified by this agent' });
+  }
+  
+  // Handle victim flag immediately
+  if (verdict === 'flag_victim') {
+    finding.status = 'redacted';
+    finding.is_victim = true;
+    finding.content = '[REDACTED - VICTIM PROTECTION]';
+    finding.context = '[REDACTED - VICTIM PROTECTION]';
+    
+    console.log(`🛡️  VICTIM PROTECTION: Finding ${findingId} redacted by ${agentId}`);
+    
+    fVerifications.push({
+      verifier_agent_id: agentId,
+      verdict,
+      confidence: confidence || 1.0,
+      notes,
+      created_at: new Date().toISOString()
+    });
+    verifications.set(findingId, fVerifications);
+    
+    return res.json({ action: 'victim_flagged', status: 'redacted' });
+  }
+  
+  // Record verification
+  fVerifications.push({
+    verifier_agent_id: agentId,
+    verdict,
+    confidence: confidence || 0.5,
+    notes,
+    created_at: new Date().toISOString()
+  });
+  verifications.set(findingId, fVerifications);
+  
+  // Count verdicts
+  const confirms = fVerifications.filter(v => v.verdict === 'confirm').length;
+  const disputes = fVerifications.filter(v => v.verdict === 'dispute').length;
+  const rejects = fVerifications.filter(v => v.verdict === 'reject').length;
+  
+  finding.verification_count = fVerifications.length;
+  finding.verified_by = fVerifications.map(v => v.verifier_agent_id);
+  
+  // Check if thresholds are met
+  let shouldPublish = false;
+  if (rejects >= 3) {
+    finding.status = 'disputed';
+  } else if (confirms >= 3 && finding.confidence >= 0.9) {
+    finding.status = 'published';
+    finding.published_at = new Date().toISOString();
+    shouldPublish = true;
+  } else if (confirms >= 5 && finding.confidence >= 0.5) {
+    finding.status = 'published';
+    finding.published_at = new Date().toISOString();
+    shouldPublish = true;
+  } else if (confirms >= 3) {
+    finding.status = 'verified';
+  }
+  
+  if (shouldPublish) {
+    console.log(`📢 Finding ${findingId} PUBLISHED (${confirms} confirmations, confidence ${finding.confidence})`);
+  }
+  
+  res.json({
+    findingId,
+    verificationCount: fVerifications.length,
+    confirms,
+    disputes,
+    rejects,
+    status: finding.status,
+    published: shouldPublish
+  });
+});
+
+// ==========================================
+// LEADERBOARD
+// ==========================================
+
+app.get('/api/leaderboard', (req, res) => {
+  const agentList = Array.from(agents.values())
+    .map(a => ({
+      agent_id: a.agent_id,
+      tasks_completed: a.tasks_completed,
+      reputation_score: a.reputation_score || 0,
+      registered_at: a.registered_at
+    }))
+    .sort((a, b) => b.tasks_completed - a.tasks_completed)
+    .slice(0, parseInt(req.query.limit) || 50);
+  
+  res.json({
+    leaderboard: agentList,
+    count: agentList.length,
+    updated_at: new Date().toISOString()
+  });
+});
+
+// ==========================================
+// ENHANCED STATS (with findings data)
+// ==========================================
+
+// Override the basic stats endpoint
+app.get('/api/stats/detailed', (req, res) => {
+  const allFindings = Array.from(findings.values());
+  
+  res.json({
+    agents: {
+      registered: agents.size,
+      active: Array.from(agents.values()).filter(a => a.tasks_completed > 0).length
+    },
+    tasks: {
+      total: tasks.size,
+      available: Array.from(tasks.values()).filter(t => t.status === 'available').length,
+      claimed: Array.from(tasks.values()).filter(t => t.status === 'claimed').length,
+      completed: Array.from(tasks.values()).filter(t => t.status === 'completed').length,
+      verified: Array.from(tasks.values()).filter(t => t.status === 'verified').length
+    },
+    findings: {
+      total: allFindings.length,
+      pending: allFindings.filter(f => f.status === 'pending').length,
+      verified: allFindings.filter(f => f.status === 'verified').length,
+      published: allFindings.filter(f => f.status === 'published').length,
+      disputed: allFindings.filter(f => f.status === 'disputed').length,
+      redacted: allFindings.filter(f => f.status === 'redacted').length,
+      by_type: {
+        entity: allFindings.filter(f => f.type === 'entity').length,
+        unredaction: allFindings.filter(f => f.type === 'unredaction').length,
+        relationship: allFindings.filter(f => f.type === 'relationship').length
+      }
+    },
+    pages: {
+      processed: results.size * 1000,
+      total: 3500000,
+      progress: (results.size * 1000 / 3500000 * 100).toFixed(2) + '%'
+    },
+    verifications: {
+      total: Array.from(verifications.values()).reduce((sum, v) => sum + v.length, 0)
+    }
   });
 });
 
